@@ -85,7 +85,8 @@ def fetch_page_metadata(path: str) -> dict:
         "title": details.get("title", ""),
         "contentType": details.get("contentType", ""),
         "contentId": details.get("contentId", ""),
-        "releaseYear": details.get("releaseYear", "")
+        "releaseYear": details.get("releaseYear", ""),
+        "tentativeReleaseDate": details.get("tentativeReleaseDate","")
     }
 
 def fetch_manifest(cid: str) -> str:
@@ -349,6 +350,12 @@ def main():
 
     elif args.download:  # Movie
         manifest = fetch_manifest(cid)
+        # ——— If there's no streaming manifest yet, bail out with the Coming Soon date ——————————————————
+        if not manifest:
+            coming = meta.get("tentativeReleaseDate", "TBA")
+            console.print(f"[bold yellow]Streaming From: {coming}[/]")
+            sys.exit(0)
+        # ——— RAW support for movie —————————————————————————————————————————————————————   
         if args.raw:
             m = re.search(r"/Renditions/(\d{8})/", manifest)
             if m:
