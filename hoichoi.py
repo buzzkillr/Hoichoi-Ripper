@@ -79,145 +79,84 @@ def extract_path(url: str) -> str:
 
 def fetch_page_metadata(path: str) -> dict:
     cookies = {'NEXT_LOCALE': 'en'}
-    
     headers = {
         'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
         'accept-language': 'en-US,en;q=0.9,hi;q=0.8,mr;q=0.7,zh-TW;q=0.6,zh;q=0.5',
         'sec-ch-ua': '"Google Chrome";v="141", "Not?A_Brand";v="8", "Chromium";v="141"',
         'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36',
     }
-    
+
     resp = requests.get(
-        "https://hoichoi.tv" + path, 
-        headers=headers, 
+        "https://hoichoi.tv" + path,
+        headers=headers,
         cookies=cookies,
         impersonate="chrome",
         timeout=15
     )
     resp.raise_for_status()
-    
-    # Find all __next_f.push patterns
+
+    # 1) grab all self.__next_f.push payload chunks
     pushes = re.findall(r'self\.__next_f\.push\(\[1,"([\s\S]*?)"\]\)', resp.text)
-    
-    # Look for the pattern that contains detailsData instead of just the longest
-    target_blob = None
-    for push in pushes:
-        if "detailsData" in push:
-            target_blob = push
-            break
-    
-    # If no detailsData found, fallback to patterns with content keywords
-    if not target_blob:
-        content_keywords = ["contentId", "contentType", "title", "releaseYear"]
-        for push in pushes:
-            if any(keyword in push for keyword in content_keywords) and len(push) > 1000:
-                target_blob = push
-                break
-    
-    # Final fallback to longest blob
-    if not target_blob:
-        target_blob = max(pushes, key=len)
-    
-    # Extract the JSON part after the colon
-    blob = target_blob.split(":", 1)[1]
-    
-    try:
-        # Decode unicode escapes and parse JSON
-        decoded_blob = blob.encode("utf-8").decode("unicode_escape")
-        parsed_data = json.loads(decoded_blob)
-        
-        # Navigate to detailsData - it might be nested differently
-        details = None
-        
-        # Try the original path first
-        if isinstance(parsed_data, list) and len(parsed_data) > 3:
-            if isinstance(parsed_data[3], dict) and "detailsData" in parsed_data[3]:
-                details = parsed_data[3]["detailsData"]
-        
-        # If not found, search recursively
-        if not details:
-            def find_details_data(obj):
-                if isinstance(obj, dict):
-                    if "detailsData" in obj:
-                        return obj["detailsData"]
-                    for value in obj.values():
-                        result = find_details_data(value)
-                        if result:
-                            return result
-                elif isinstance(obj, list):
-                    for item in obj:
-                        result = find_details_data(item)
-                        if result:
-                            return result
-                return None
-            
-            details = find_details_data(parsed_data)
-        
-        # If still no detailsData found, extract from the response text directly
-        if not details:
-            # Fallback regex extraction using the debug results patterns
-            result = {}
-            
-            # Use the patterns that worked in the debug output
-            content_id_match = re.search(r'contentId[^a-f0-9]*([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', resp.text)
-            if content_id_match:
-                result['contentId'] = content_id_match.group(1)
-            
-            content_type_match = re.search(r'contentType[^a-zA-Z]*(series|season|movie|episode)', resp.text)
-            if content_type_match:
-                result['contentType'] = content_type_match.group(1)
-            
-            # Extract title - look for "Nishir Daak" or other show titles
-            title_match = re.search(r'title[^"]*"([^"]*)"', resp.text)
-            if title_match:
-                title = title_match.group(1)
-                title = re.sub(r'^Watch\s+', '', title)
-                title = re.sub(r'\s+Bengali\s+Web\s+Series.*$', '', title)
-                result['title'] = title.strip()
-            
-            year_match = re.search(r'releaseYear[^0-9]*(\d{4})', resp.text)
-            if year_match:
-                result['releaseYear'] = year_match.group(1)
-            
-            result['tentativeReleaseDate'] = ""
-            
-            return result
-        
+    if not pushes:
+        raise ValueError("No __next_f.push payloads found")
+
+    # 2) join them – detailsData is split across multiple chunks
+    full_payload = "".join(pushes)
+
+    # 3) try to locate detailsData JSON inside the combined string
+    #    note: everything is inside a JSON string, so quotes are escaped (\")
+    m = re.search(r'\\"detailsData\\":(\{.*?\})\\,"shortSynopsis\\"', full_payload, re.DOTALL)
+    details = None
+    if m:
+        details_json = m.group(1)
+        try:
+            # unescape the string and parse JSON
+            decoded = details_json.encode("utf-8").decode("unicode_escape")
+            details = json.loads(decoded)
+        except Exception:
+            details = None
+
+    if details:
         return {
             "title": details.get("title", ""),
             "contentType": details.get("contentType", ""),
             "contentId": details.get("contentId", ""),
             "releaseYear": details.get("releaseYear", ""),
-            "tentativeReleaseDate": details.get("tentativeReleaseDate", "")
+            "tentativeReleaseDate": details.get("tentativeReleaseDate", ""),
         }
-        
-    except (json.JSONDecodeError, KeyError, IndexError, UnicodeDecodeError) as e:
-        # If JSON parsing fails, use regex fallback based on debug results
-        result = {}
-        
-        content_id_match = re.search(r'contentId[^a-f0-9]*([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', resp.text)
-        if content_id_match:
-            result['contentId'] = content_id_match.group(1)
-        
-        content_type_match = re.search(r'contentType[^a-zA-Z]*(series|season|movie|episode)', resp.text)
-        if content_type_match:
-            result['contentType'] = content_type_match.group(1)
-        
-        # Extract and clean title
-        title_match = re.search(r'title[^"]*"([^"]*)"', resp.text)
-        if title_match:
-            title = title_match.group(1)
-            title = re.sub(r'^Watch\s+', '', title)
-            title = re.sub(r'\s+Bengali\s+Web\s+Series.*$', '', title)
-            result['title'] = title.strip()
-        
-        year_match = re.search(r'releaseYear[^0-9]*(\d{4})', resp.text)
-        if year_match:
-            result['releaseYear'] = year_match.group(1)
-        
-        result['tentativeReleaseDate'] = ""
-        
-        return result
+
+    # 4) fallback – very narrow: work on full_payload only
+    result = {}
+
+    cid_match = re.search(
+        r'contentId\\":\\"([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\\"',
+        full_payload
+    )
+    if cid_match:
+        result["contentId"] = cid_match.group(1)
+
+    ctype_match = re.search(
+        r'contentType\\":\\"(series|season|movie|episode)\\"',
+        full_payload
+    )
+    if ctype_match:
+        result["contentType"] = ctype_match.group(1)
+
+    title_match = re.search(r'title\\":\\"([^"]*)\\"', full_payload)
+    if title_match:
+        result["title"] = title_match.group(1).strip()
+
+    year_match = re.search(r'releaseYear\\":(\d{4})', full_payload)
+    if year_match:
+        result["releaseYear"] = year_match.group(1)
+
+    result.setdefault("title", "")
+    result.setdefault("contentType", "")
+    result.setdefault("contentId", "")
+    result.setdefault("releaseYear", "")
+    result["tentativeReleaseDate"] = ""
+
+    return result
 
 def fetch_manifest(cid: str) -> str:
     resp = requests.get(VIDEO_API_URL, params={"platform": "ROKU", "language": "english", "contentIds": cid}, headers=SITEID_HEADER, timeout=10)
@@ -541,3 +480,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
